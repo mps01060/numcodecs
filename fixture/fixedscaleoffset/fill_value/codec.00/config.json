@@ -1,0 +1,8 @@
+{
+    "astype": "<i2",
+    "dtype": "<f4",
+    "fill_value": -32768,
+    "id": "fixedscaleoffset",
+    "offset": 0,
+    "scale": 100
+}

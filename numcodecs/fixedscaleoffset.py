@@ -20,12 +20,24 @@ class FixedScaleOffset(Codec):
         Data type to use for decoded data.
     astype : dtype, optional
         Data type to use for encoded data.
+    fill_value : integer, optional
+        A value used to represent NaNs during encoding when `astype` is an integer
+        data type. This allows round-tripping NaN values by encoding them as an 
+        integer and decoding them back to NaN. Similar to the `add_offset` and 
+        `scale_factor` in netCDF4, `fill_value` ensures NaNs can be preserved 
+        during the transformation. It is only relevant when `astype` is an integer 
+        dtype and ignored for float types. If not provided, NaNs are not encoded.
 
     Notes
     -----
-    If `astype` is an integer data type, please ensure that it is
-    sufficiently large to store encoded values. No checks are made and data
-    may become corrupted due to integer overflow if `astype` is too small.
+    If `astype` is an integer data type, please ensure that it is sufficiently
+    large to store encoded values. No checks are made and data may become corrupted
+    due to integer overflow if `astype` is too small.
+
+    When `fill_value` is provided and `astype` is an integer dtype, NaNs are 
+    encoded as this value and are decoded back to NaNs during the reverse 
+    transformation. This is not implemented for astype==float, because `fill_value`
+    is not required as NaNs are natively supported by floats.
 
     Examples
     --------
@@ -60,6 +72,18 @@ class FixedScaleOffset(Codec):
     >>> z3
     array([1000.   , 1000.111, 1000.222, 1000.333, 1000.444, 1000.556,
            1000.667, 1000.778, 1000.889, 1001.   ])
+    >>> x_nans = np.linspace(0, 0.1, 10, dtype='f4')
+    >>> x_nans[0] = np.nan
+    >>> x_nans
+    array([       nan, 0.01111111, 0.02222222, 0.03333334, 0.04444445,
+           0.05555556, 0.06666667, 0.07777778, 0.08888889, 0.1       ], dtype=float32)
+    >>> codec = numcodecs.FixedScaleOffset(offset=0, scale=100, dtype='f4', astype='i2', fill_value=-32768)
+    >>> y4 = codec.encode(x_nans)
+    >>> y4
+    array([-32768, 1, 2, 3, 4, 6, 7, 8, 9, 10], dtype=int16)
+    >>> z4 = codec.decode(y4)
+    >>> z4
+    array([ nan, 0.01, 0.02, 0.03, 0.04, 0.06, 0.07, 0.08, 0.09, 0.1 ], dtype=float32)
 
     See Also
     --------
@@ -69,7 +93,7 @@ class FixedScaleOffset(Codec):
 
     codec_id = 'fixedscaleoffset'
 
-    def __init__(self, offset, scale, dtype, astype=None):
+    def __init__(self, offset, scale, dtype, astype=None, fill_value=None):
         self.offset = offset
         self.scale = scale
         self.dtype = np.dtype(dtype)
@@ -79,6 +103,26 @@ class FixedScaleOffset(Codec):
             self.astype = np.dtype(astype)
         if self.dtype == np.dtype(object) or self.astype == np.dtype(object):
             raise ValueError('object arrays are not supported')
+        if fill_value is not None:
+            if np.issubdtype(self.astype, np.floating):
+                raise NotImplementedError(
+                    'Encoding floats to floats does not require a fill_value '
+                    'since floats natively support NaNs.'
+                )
+            if not np.issubdtype(self.dtype, np.floating):
+                raise TypeError(
+                    f'fill_value requires a floating-point input dtype, but got dtype "{self.dtype}".'
+                )
+            if not isinstance(fill_value, (int, np.integer)):
+                raise TypeError('fill_value must be an integer value')
+            if not np.can_cast(fill_value, self.astype, casting='safe'):
+                raise ValueError(
+                    f'fill_value "{fill_value}"" cannot be safely cast to output dtype "{self.astype}"'
+                )
+            # Convert NumPy integer to Python native types for JSON serialization compatibility
+            if isinstance(fill_value, np.integer):
+                fill_value = int(fill_value)
+        self.fill_value = fill_value
 
     def encode(self, buf):
         # normalise input
@@ -89,6 +133,10 @@ class FixedScaleOffset(Codec):
 
         # compute scale offset
         enc = (arr - self.offset) * self.scale
+
+        # change nans to fill_value
+        if self.fill_value is not None:
+            enc[np.isnan(enc)] = self.fill_value
 
         # round to nearest integer
         enc = np.around(enc)
@@ -108,6 +156,10 @@ class FixedScaleOffset(Codec):
         # decode scale offset
         dec = (enc / self.scale) + self.offset
 
+        # convert fill_values to nans
+        if self.fill_value is not None:
+            dec[enc==self.fill_value] = np.nan
+
         # convert dtype
         dec = dec.astype(self.dtype, copy=False)
 
@@ -121,6 +173,7 @@ class FixedScaleOffset(Codec):
             scale=self.scale,
             offset=self.offset,
             dtype=self.dtype.str,
+            fill_value=self.fill_value,
             astype=self.astype.str,
         )
 
@@ -128,5 +181,7 @@ class FixedScaleOffset(Codec):
         r = f'{type(self).__name__}(scale={self.scale}, offset={self.offset}, dtype={self.dtype.str!r}'
         if self.astype != self.dtype:
             r += f', astype={self.astype.str!r}'
+        if self.fill_value is not None:
+            r += f', fill_value={self.fill_value}'
         r += ')'
         return r
